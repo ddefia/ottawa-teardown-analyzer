@@ -55,9 +55,9 @@ price: {_fmt_price(price)}
 zone: "{L.get('zone_code', 'Unknown')}"
 zone_main: "{L.get('zone_main', '')}"
 neighbourhood: "{L.get('neighbourhood', '')}"
-lot_sqft: {L.get('lot_size_sqft', 0):.0f}
-estimated_units: {L.get('estimated_units', 0)}
-potential_units: {L.get('potential_units', 0)}
+lot_sqft: {L.get('lot_size_sqft') or 0:.0f}
+estimated_units: {L.get('estimated_units') or 0}
+potential_units: {L.get('potential_units') or 0}
 rezone_likelihood: "{L.get('rezone_likelihood', 'Unknown')}"
 mls: "{L.get('mls_number', '')}"
 analyzed: "{RUN_TIMESTAMP}"
@@ -74,10 +74,10 @@ analyzed: "{RUN_TIMESTAMP}"
 | MLS | {L.get('mls_number', 'N/A')} |
 | Price | {_fmt_price(price)} |
 | Property Type | {L.get('property_type', 'N/A')} |
-| Lot Size | {L.get('lot_size_sqft', 0):,.0f} sqft |
-| Frontage | {L.get('lot_frontage_ft', 0) or 'N/A'} ft |
-| Depth | {L.get('lot_depth_ft', 0) or 'N/A'} ft |
-| Building | {L.get('building_sqft', 0) or 0:,.0f} sqft |
+| Lot Size | {L.get('lot_size_sqft') or 0:,.0f} sqft |
+| Frontage | {L.get('lot_frontage_ft') or 'N/A'} ft |
+| Depth | {L.get('lot_depth_ft') or 'N/A'} ft |
+| Building | {L.get('building_sqft') or 0:,.0f} sqft |
 | Year Built | {L.get('year_built') or 'N/A'} |
 | Neighbourhood | {L.get('neighbourhood', 'N/A')} |
 
@@ -97,10 +97,10 @@ analyzed: "{RUN_TIMESTAMP}"
 
 | Metric | Value |
 |--------|-------|
-| Buildable Area | {L.get('buildable_area_sqft', 0):,.0f} sqft |
-| Max GFA | {L.get('max_gfa_sqft', 0):,.0f} sqft |
-| Estimated Floors | {L.get('estimated_floors', 0)} |
-| **Estimated Units** | **{L.get('estimated_units', 0)}** |
+| Buildable Area | {L.get('buildable_area_sqft') or 0:,.0f} sqft |
+| Max GFA | {L.get('max_gfa_sqft') or 0:,.0f} sqft |
+| Estimated Floors | {L.get('estimated_floors') or 0} |
+| **Estimated Units** | **{L.get('estimated_units') or 0}** |
 | Price / Unit | {_fmt_price(L.get('price_per_unit'))} |
 | Price / Buildable sqft | {_fmt_price(L.get('price_per_buildable_sqft'), decimals=2)} |
 
@@ -111,7 +111,7 @@ analyzed: "{RUN_TIMESTAMP}"
 | Potential Zone | **{L.get('potential_zone', 'N/A')}** |
 | Potential Height | {L.get('potential_height_m', 'N/A')}m |
 | Potential FSI | {L.get('potential_fsi', 'N/A')} |
-| **Potential Units** | **{L.get('potential_units', 0)}** |
+| **Potential Units** | **{L.get('potential_units') or 0}** |
 | Rezone Likelihood | **{L.get('rezone_likelihood', 'Unknown')}** |
 | Potential Value | {_fmt_price(L.get('potential_value'))} |
 | **Spread (Upside)** | **{_fmt_price(L.get('spread'))}** |
@@ -128,7 +128,7 @@ analyzed: "{RUN_TIMESTAMP}"
 | Price | {L.get('score_price', 0)} | 15 |
 | Market | {L.get('score_market', 0)} | 15 |
 | **Total** | **{score}** | **100** |
-
+{_llm_section(L)}
 ## Description
 
 {L.get('description', 'No description available.')[:1000]}
@@ -138,6 +138,30 @@ analyzed: "{RUN_TIMESTAMP}"
 *Analyzed: {RUN_TIMESTAMP}*
 """
     return md
+
+
+def _llm_section(L: dict) -> str:
+    """Render the Claude Haiku analysis block if enrichment ran."""
+    thesis = L.get("llm_investment_thesis")
+    if not thesis:
+        return ""
+    signal = L.get("llm_teardown_signal", "")
+    reasoning = L.get("llm_teardown_reasoning", "")
+    risks = L.get("llm_key_risks", "")
+    flags = L.get("llm_description_flags") or []
+    flags_str = ", ".join(flags) if flags else "None"
+    return f"""
+## AI Analysis (Claude Haiku)
+
+> **Investment Thesis:** {thesis}
+
+| | |
+|-|-|
+| Teardown Signal | **{signal}** |
+| Teardown Reasoning | {reasoning} |
+| Key Risks | {risks} |
+| Description Flags | {flags_str} |
+"""
 
 
 def _fmt_price(val, decimals=0) -> str:

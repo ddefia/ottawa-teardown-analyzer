@@ -5,7 +5,10 @@ import os
 from datetime import datetime
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-OBSIDIAN_VAULT = "/Users/anthonybassi/Downloads/home/Companies/JBPA/Real Estate"
+OBSIDIAN_VAULT = os.environ.get(
+    "OBSIDIAN_VAULT",
+    "/Users/anthonybassi/Downloads/home/Companies/JBPA/Real Estate",
+)
 OUTPUT_JSON = os.path.join(os.path.dirname(__file__), "results.json")
 
 # ── API Endpoints ──────────────────────────────────────────────────────────
@@ -38,6 +41,9 @@ MIN_LOT_SQFT = 3000
 CONDO_KEYWORDS = [
     "condo", "condominium", "strata", "apartment unit", "penthouse",
     "unit #", "suite #", "apt.", "apt ",
+    # realtor.ca property type strings
+    "apartment/condo", "condo apt", "comm element condo", "condo townhouse",
+    "condo apartment",
 ]
 PROTECTED_KEYWORDS = [
     "greenbelt", "ncc ", "national capital commission",

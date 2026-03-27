@@ -14,6 +14,7 @@ from zoning import enrich_listing_with_zoning
 from feasibility import calculate_feasibility
 from scoring import score_listing
 from obsidian import save_obsidian_summaries
+from llm_enrichment import enrich_listings_with_llm
 
 # ── Logging ───────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -61,8 +62,12 @@ def run():
     # ── Sort by score ─────────────────────────────────────────────────
     listings.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-    # ── Step 5: Output ────────────────────────────────────────────────
-    log.info("Step 5: Generating output...")
+    # ── Step 5: LLM enrichment (optional, requires ANTHROPIC_API_KEY) ─
+    log.info("Step 5: LLM enrichment (top candidates)...")
+    listings = enrich_listings_with_llm(listings)
+
+    # ── Step 6: Output ────────────────────────────────────────────────
+    log.info("Step 6: Generating output...")
 
     # JSON output
     output = {

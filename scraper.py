@@ -45,45 +45,90 @@ HEADERS = {
 # ═══════════════════════════════════════════════════════════════════════════
 
 def scrape_realtor_ca_playwright() -> list[dict]:
-    """Scrape realtor.ca using Playwright with stealth fingerprints.
-    Navigates like a real user and intercepts the API responses."""
+    """Scrape realtor.ca using Playwright stealth browser.
+    Opens the map page and intercepts the PropertySearch API responses."""
     try:
-        from scrapling import PlayWrightFetcher
+        from rebrowser_playwright.sync_api import sync_playwright
     except ImportError:
-        log.error("scrapling not installed. Run: pip3 install scrapling && scrapling install")
+        log.error("rebrowser-playwright not installed. Run: pip3 install scrapling && scrapling install")
         return []
 
     log.info("Launching stealth browser for realtor.ca...")
     all_listings = []
+    captured_api_data = []
+
+    def handle_response(response):
+        """Intercept API responses from realtor.ca."""
+        url = response.url
+        if "PropertySearch_Post" in url or "PropertySearch" in url:
+            try:
+                body = response.json()
+                results = body.get("Results", [])
+                if results:
+                    captured_api_data.extend(results)
+                    log.info(f"  Intercepted {len(results)} listings from API")
+            except Exception:
+                pass
 
     try:
-        # Configure before instantiating
-        PlayWrightFetcher.configure(headless=True, disable_resources=False)
-        fetcher = PlayWrightFetcher()
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                viewport={"width": 1440, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                ),
+                locale="en-CA",
+            )
+            page = context.new_page()
+            page.on("response", handle_response)
 
-        # Load the search page with Ottawa bounds
-        url = (
-            "https://www.realtor.ca/map"
-            "#ZoomLevel=11"
-            f"&Center=45.39%2C-75.69"
-            f"&LatitudeMax={OTTAWA_BOUNDS['lat_max']}"
-            f"&LongitudeMax={OTTAWA_BOUNDS['lon_max']}"
-            f"&LatitudeMin={OTTAWA_BOUNDS['lat_min']}"
-            f"&LongitudeMin={OTTAWA_BOUNDS['lon_min']}"
-            "&Sort=6-A"
-            "&PropertyTypeGroupID=1"
-            "&TransactionTypeId=2"
-            "&PropertySearchTypeId=0"
-        )
-        page = fetcher.fetch(url, timeout=45000)
+            # Navigate to the map page with Ottawa bounds
+            url = (
+                "https://www.realtor.ca/map"
+                "#ZoomLevel=11"
+                f"&Center=45.39%2C-75.69"
+                f"&LatitudeMax={OTTAWA_BOUNDS['lat_max']}"
+                f"&LongitudeMax={OTTAWA_BOUNDS['lon_max']}"
+                f"&LatitudeMin={OTTAWA_BOUNDS['lat_min']}"
+                f"&LongitudeMin={OTTAWA_BOUNDS['lon_min']}"
+                "&Sort=6-A"
+                "&PropertyTypeGroupID=1"
+                "&TransactionTypeId=2"
+                "&PropertySearchTypeId=0"
+            )
+            log.info("  Navigating to realtor.ca map...")
+            page.goto(url, wait_until="networkidle", timeout=60000)
 
-        if page.status != 200 or not page.html_content or len(page.html_content) < 5000:
-            log.warning("realtor.ca blocked the stealth browser request")
-            return []
+            # Wait for API data to arrive
+            page.wait_for_timeout(5000)
 
-        # Parse listings from the page HTML
-        all_listings = _parse_realtor_html(page.html_content)
-        log.info(f"Scraped {len(all_listings)} listings via Playwright")
+            # Try switching to list view to trigger more data
+            try:
+                list_btn = page.locator('button:has-text("List")').first
+                if list_btn.is_visible(timeout=3000):
+                    list_btn.click()
+                    page.wait_for_timeout(5000)
+            except Exception:
+                pass
+
+            browser.close()
+
+        log.info(f"  Captured {len(captured_api_data)} raw listings from API intercepts")
+
+        # Parse captured API responses
+        seen_ids = set()
+        for raw in captured_api_data:
+            lid = raw.get("Id")
+            if lid in seen_ids:
+                continue
+            seen_ids.add(lid)
+            listing = _parse_realtor_listing(raw)
+            if listing and _is_redevelopment_candidate(listing):
+                all_listings.append(listing)
+
+        log.info(f"  Filtered to {len(all_listings)} redevelopment candidates")
 
     except Exception as e:
         log.error(f"Playwright scraping failed: {e}")
@@ -199,9 +244,9 @@ def _parse_realtor_listing(raw: dict) -> Optional[dict]:
     if any(kw in all_text for kw in PROTECTED_KEYWORDS):
         return None
 
-    lot_size_sqft = _parse_lot_size(land)
-    lot_frontage_ft = _safe_float(land.get("SizeFrontage", ""))
-    lot_depth_ft = _safe_float(land.get("SizeDepth", ""))
+    lot_size_sqft = _cross_validate_lot(_parse_lot_size(land), land, _parse_price(prop.get("Price", "")))
+    lot_frontage_ft = _parse_frontage_ft(land.get("SizeFrontage", ""))
+    lot_depth_ft = _parse_frontage_ft(land.get("SizeDepth", ""))
 
     is_vacant = "vacant" in all_text or "land" in property_type.lower()
     if lot_size_sqft and lot_size_sqft < MIN_LOT_SQFT and not is_vacant:
@@ -483,8 +528,43 @@ def scrape_ottawa_listings(csv_path: str = None) -> list[dict]:
 # Utility functions
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _is_condo_unit(listing: dict) -> bool:
+    """Return True if this listing is a strata/condo unit (not a land parcel).
+    Condo units have no tear-down value — the owner doesn't control the land.
+    """
+    address = (listing.get("address") or "").strip()
+    prop_type = (listing.get("property_type") or "").lower()
+    btype = (listing.get("building_type") or "").lower()
+    desc = (listing.get("description") or "").lower()
+
+    # Address starts with a unit/suite designator: "705 - 203 CATHERINE", "C002 - 1910 ST"
+    # Pattern: [alphanumeric unit] " - " [number street]
+    if re.match(r'^[A-Z0-9]+[-\s]*\d*\s+-\s+\d', address):
+        return True
+
+    # Property / building type strings from realtor.ca
+    condo_type_keywords = [
+        "condo", "condominium", "apartment/condo", "condo apt",
+        "comm element condo", "strata",
+    ]
+    if any(kw in prop_type for kw in condo_type_keywords):
+        return True
+    if any(kw in btype for kw in condo_type_keywords):
+        return True
+
+    # Description explicitly says it's a condo unit
+    if any(kw in desc for kw in CONDO_KEYWORDS):
+        return True
+
+    return False
+
+
 def _is_redevelopment_candidate(listing: dict) -> bool:
     """Smart filter: does this listing have tear-down/rebuild potential?"""
+    # Hard exclusion: condo/strata units can never be torn down independently
+    if _is_condo_unit(listing):
+        return False
+
     desc = (listing.get("description") or "").lower()
     prop_type = (listing.get("property_type") or "").lower()
     btype = (listing.get("building_type") or "").lower()
@@ -521,28 +601,93 @@ def _is_redevelopment_candidate(listing: dict) -> bool:
     return False
 
 
-def _parse_lot_size(land: dict) -> Optional[float]:
-    size_total = land.get("SizeTotal", "")
-    if not size_total:
-        frontage = _safe_float(land.get("SizeFrontage", ""))
-        depth = _safe_float(land.get("SizeDepth", ""))
-        if frontage and depth:
-            return frontage * depth
-        return None
+_SQFT_PER_ACRE = 43560.0
+_SQFT_PER_HA   = 107639.0
+_SQFT_PER_SQM  = 10.7639
+_M_TO_FT       = 3.28084
 
-    size_str = str(size_total).lower().replace(",", "").strip()
-    if "sqft" in size_str or "sq ft" in size_str:
-        return _extract_number(size_str)
-    if "acre" in size_str:
-        n = _extract_number(size_str)
-        return n * 43560 if n else None
-    if "hectare" in size_str or "ha" in size_str:
-        n = _extract_number(size_str)
-        return n * 107639 if n else None
-    if "sqm" in size_str or "m2" in size_str or "m²" in size_str:
-        n = _extract_number(size_str)
-        return n * 10.7639 if n else None
-    return _extract_number(size_str)
+
+def _parse_frontage_ft(raw: str) -> Optional[float]:
+    """Parse SizeFrontage/SizeDepth to feet. Handles m, ft, ft+in formats."""
+    if not raw:
+        return None
+    s = str(raw).lower().strip()
+    ft_in = re.match(r'(\d+\.?\d*)\s*ft\s*[,\s]*(\d+\.?\d*)\s*in', s)
+    if ft_in:
+        return float(ft_in.group(1)) + float(ft_in.group(2)) / 12
+    ft_only = re.match(r'(\d+\.?\d*)\s*(ft|\')', s)
+    if ft_only:
+        return float(ft_only.group(1))
+    m_only = re.match(r'(\d+\.?\d*)\s*m\b', s)
+    if m_only:
+        return float(m_only.group(1)) * _M_TO_FT
+    bare = re.search(r'\d+\.?\d*', s)
+    return float(bare.group()) if bare else None
+
+
+def _parse_lot_size(land: dict) -> Optional[float]:
+    """Parse realtor.ca Land dict to lot size in sqft."""
+    size_total = (land.get("SizeTotal") or "").strip()
+
+    if size_total:
+        s = size_total.lower().replace(",", "")
+
+        dim = re.match(r'(\d+\.?\d*)\s*x\s*(\d+\.?\d*)\s*(ft|m\b)?', s)
+        if dim:
+            w, d = float(dim.group(1)), float(dim.group(2))
+            unit = (dim.group(3) or "ft").strip()
+            area = w * d
+            return area * _SQFT_PER_SQM if unit == "m" else area
+
+        if "sqft" in s or "sq ft" in s:
+            return _extract_number(s)
+
+        if "half acre" in s or "1/2 acre" in s:
+            return 0.5 * _SQFT_PER_ACRE
+
+        if re.search(r'\bac\b', s) or "acre" in s:
+            n = _extract_number(s)
+            return n * _SQFT_PER_ACRE if n else None
+
+        if "ha" in s or "hectare" in s:
+            n = _extract_number(s)
+            return n * _SQFT_PER_HA if n else None
+
+        if "sqm" in s or "m2" in s or "m²" in s:
+            n = _extract_number(s)
+            return n * _SQFT_PER_SQM if n else None
+
+        if re.search(r'^\d+\.?\d*\s*ft$', s):
+            return None  # single dimension, not an area
+
+        bare = re.search(r'\d+\.?\d*', s)
+        if bare:
+            val = float(bare.group())
+            if val < 5:
+                return val * _SQFT_PER_ACRE
+            if val <= 2000:
+                return val * _SQFT_PER_SQM
+            return val
+
+    front = _parse_frontage_ft(land.get("SizeFrontage", ""))
+    depth = _parse_frontage_ft(land.get("SizeDepth", ""))
+    if front and depth and front < 800 and depth < 800:
+        return front * depth
+    return None
+
+
+def _cross_validate_lot(result: Optional[float], land: dict, price=None) -> Optional[float]:
+    """Catch realtor.ca unit-mismatch errors (e.g. '78 ac' when frontage='78 ft').
+    If implied depth exceeds 2000 ft, fall back to frontage × typical depth."""
+    if not result or result <= 50000:
+        return result
+    front = _parse_frontage_ft(land.get("SizeFrontage", ""))
+    if front and front > 0 and result / front > 2000:
+        depth = _parse_frontage_ft(land.get("SizeDepth", ""))
+        return front * (depth if depth and depth < 800 else 120)
+    if result > 500_000 and price and price < 20_000_000:
+        return 500_000
+    return result
 
 
 def _extract_number(s: str) -> Optional[float]:

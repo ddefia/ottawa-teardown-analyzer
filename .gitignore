@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .env
 results.json
+listings.csv
 *.log
 .DS_Store
 venv/
